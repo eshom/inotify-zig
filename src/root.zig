@@ -1,80 +1,89 @@
 const std = @import("std");
 const testing = std.testing;
-const linux = std.os.linux;
+const posix = std.posix;
 
-pub const InotifyInst = struct {
+pub const Inotify = struct {
     fd: i32,
 };
 
-/// Event Flags
-pub const events = struct {
-    /// Events suitable for mask parameter of `inotify_add_watch`
-    pub const Mask = enum(u32) {
-        in_access = 0x00000001, // File was accessed.
-        in_modify = 0x00000002, // File was modified.
-        in_attrib = 0x00000004, // Metadata changed.
-        in_close_write = 0x00000008, // Writtable file was closed.
-        in_close_nowrite = 0x00000010, // Unwrittable file closed.
-        in_open = 0x00000020, // File was opened.
-        in_moved_from = 0x00000040, // File was moved from X.
-        in_moved_to = 0x00000080, // File was moved to Y.
-        in_create = 0x00000100, // Subfile was created.
-        in_delete = 0x00000200, // Subfile was deleted.
-        in_delete_self = 0x00000400, // Self was deleted.
-        in_move_self = 0x00000800, // Self was moved.
+pub const InitFlags = enum(u32) {
+    in_cloexec = 0o2000000,
+    in_nonblock = 0o0004000,
+};
+
+// TODO: Make flags doc clearer.
+// take from manual when calrification is warranted.
+
+/// Flags used by inotify.
+/// See manual `inotify(7)` for details.
+pub const EventFlags = packed struct(u32) {
+    // Events suitable for mask parameter of `inotify_add_watch`
+    in_access: bool = false, // File was accessed.
+    in_modify: bool = false, // file was modified.
+    in_attrib: bool = false, // Metadata changed.
+    in_close_write: bool = false, // Writtable file was closed.
+    in_close_nowrite: bool = false, // Unwrittable file closed.
+    in_open: bool = false, // File was opened.
+    in_moved_from: bool = false, // File was moved from X.
+    in_moved_to: bool = false, // File was moved to Y.
+    in_create: bool = false, // Subfile was created.
+    in_delete: bool = false, // Subfile was deleted.
+    in_delete_self: bool = false, // Self was deleted.
+    in_move_self: bool = false, // self was moved.
+    _padding1: u1 = 0, // bit 13
+    // Events sent by the kernel.
+    in_unmount: bool = false, // Backing fs was unmounted.
+    in_q_overflow: bool = false, // Event queued overflowed.
+    in_ignored: bool = false, // File was ignored.
+    _padding2: u8 = 0, // bits 17 to 24
+    // Special flags
+    in_onlydir: bool = false, // Only watch the path if it is a directory
+    in_dont_follow: bool = false, // Do not follow a sym link.
+    in_excl_unlink: bool = false, // Exclude events on unlinked objects.
+    _padding3: u1 = 0, // bit 28
+    in_mask_create: bool = false, // Only create watches.
+    in_mask_add: bool = false, // Add to the mask of an already existing watch.
+    in_isdir: bool = false, // Event occuurred against dir.
+    in_oneshot: bool = false, // Only send event once.
+
+    pub const watchables: EventFlags = .{
+        .in_access = true,
+        .in_modify = true,
+        .in_attrib = true,
+        .in_close_write = true,
+        .in_close_nowrite = true,
+        .in_open = true,
+        .in_moved_from = true,
+        .in_moved_to = true,
+        .in_create = true,
+        .in_delete = true,
+        .in_delete_self = true,
+        .in_move_self = true,
     };
 
-    /// Helper events
-    pub const Helper = enum(u32) {
-        in_close = events.Mask.in_close_write | events.Mask.in_close_nowrite, // Close.
-        in_move = events.Mask.in_moved_from | events.Mask.in_moved_to, // Moves.
+    pub const specials: EventFlags = .{
+        .in_dont_follow = true,
+        .in_excl_unlink = true,
+        .in_mask_add = true,
+        .in_oneshot = true,
+        .in_onlydir = true,
+        .in_mask_create = true,
     };
 
-    /// Events sent by the kernel.
-    pub const Kernel = enum(u32) {
-        in_unmount = 0x00002000, // Backing fs was unmounted.
-        in_q_overflow = 0x00004000, // Event queued overflowed.
-        in_ignored = 0x00008000, // File was ignored.
+    pub const returnables: EventFlags = .{
+        .in_ignored = true,
+        .in_isdir = true,
+        .in_q_overflow = true,
+        .in_unmount = true,
     };
 
-    /// Special flags
-    pub const Special = enum(u32) {
-        in_onlydir = 0x01000000, // Only watch the path if it is a directory.
-        in_dont_follow = 0x02000000, // Do not follow a sym link.
-        in_excl_unlink = 0x04000000, // Exclude events on unlinked objects.
-        in_mask_create = 0x10000000, // Only create watches.
-        in_mask_add = 0x20000000, // Add to the mask of an already existing watch.
-        in_isdir = 0x40000000, // Event occurred against dir.
-        in_oneshot = 0x80000000, // Only send event once.
+    pub const in_close: EventFlags = .{
+        .in_close_nowrite = true,
+        .in_close_write = true,
     };
 
-    /// All events suitable for mask parameter of `inotify_add_watch`
-    pub const All = enum(u32) {
-        in_all_events = events.Mask.in_access |
-            events.Mask.in_modify |
-            events.Mask.in_attrib |
-            events.Mask.in_close_write |
-            events.Mask.in_close_nowrite |
-            events.Mask.in_open |
-            events.Mask.in_moved_from |
-            events.Mask.in_moved_to |
-            events.Mask.in_create |
-            events.Mask.in_delete |
-            events.Mask.in_delete_self |
-            events.Mask.in_move_self,
+    pub const in_move: EventFlags = .{
+        .in_moved_from = true,
+        .in_moved_to = true,
     };
-
-    pub const Flags = packed union {
-        mask: events.Mask,
-        helper: events.Helper,
-        kernel: events.Kernel,
-        special: events.Special,
-        all: events.All,
-    };
-
-    pub fn int(self: Flags) u32 {
-        switch (self) {
-            inline else => |val| return @intFromEnum(val),
-        }
-    }
 };

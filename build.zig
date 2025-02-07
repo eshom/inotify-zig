@@ -27,4 +27,5 @@ pub fn build(b: *std.Build) void {
 
     const check = b.step("check", "Check step for usage with zls");
     check.dependOn(&check_dummy_lib.step);
+    check.dependOn(&lib_unit_tests.step);
 }

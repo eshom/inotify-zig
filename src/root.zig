@@ -2,13 +2,45 @@ const std = @import("std");
 const testing = std.testing;
 const posix = std.posix;
 
+const InotifyInitError = posix.INotifyInitError;
+
 pub const Inotify = struct {
     fd: i32,
+
+    pub fn init(flags: InitFlags) InotifyInitError!Inotify {
+        const fd = try posix.inotify_init1(@bitCast(flags));
+        return .{
+            .fd = fd,
+        };
+    }
+
+    pub fn deinit(self: Inotify) void {
+        // TODO: Needs fsync?
+        posix.close(self.fd);
+    }
 };
 
-pub const InitFlags = enum(u32) {
-    in_cloexec = 0o2000000,
-    in_nonblock = 0o0004000,
+test Inotify {
+    const instance1: Inotify = try .init(.empty);
+    defer instance1.deinit();
+
+    const instance2: Inotify = try .init(.non_blocking);
+    defer instance2.deinit();
+
+    const instance3: Inotify = try .init(.close_on_exec);
+    defer instance3.deinit();
+}
+
+pub const InitFlags = packed struct(u32) {
+    _padding1: u11 = 0,
+    in_nonblock: bool = false,
+    _padding2: u7 = 0,
+    in_cloexec: bool = false,
+    _padding3: u12 = 0,
+
+    pub const empty: InitFlags = .{};
+    pub const non_blocking: InitFlags = .{ .in_nonblock = true };
+    pub const close_on_exec: InitFlags = .{ .in_cloexec = true };
 };
 
 // TODO: Make flags doc clearer.

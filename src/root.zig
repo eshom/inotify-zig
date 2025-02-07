@@ -29,6 +29,9 @@ test Inotify {
 
     const instance3: Inotify = try .init(.close_on_exec);
     defer instance3.deinit();
+
+    const instance4: Inotify = try .init(.non_blocking_close_on_exec);
+    defer instance4.deinit();
 }
 
 pub const InitFlags = packed struct(u32) {
@@ -41,6 +44,10 @@ pub const InitFlags = packed struct(u32) {
     pub const empty: InitFlags = .{};
     pub const non_blocking: InitFlags = .{ .in_nonblock = true };
     pub const close_on_exec: InitFlags = .{ .in_cloexec = true };
+    pub const non_blocking_close_on_exec: InitFlags = .{
+        .in_cloexec = true,
+        .in_nonblock = true,
+    };
 };
 
 // TODO: Make flags doc clearer.

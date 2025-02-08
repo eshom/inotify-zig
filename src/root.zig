@@ -7,14 +7,38 @@ const process = std.process;
 
 const INotifyEvent = std.os.linux.inotify_event;
 
+/// watched: the path associated with the event
+/// flags: flags of the associated event
+/// move_cookie: used to match `in_moved_from` and `in_moved_to`.
+/// Otherwise it's always 0.
+/// filename: optional filename associated with the event.
+pub const Event = struct {
+    flags: EventFlags,
+    move_cookie: u32,
+    watched: []const u8,
+    filename: ?[]const u8,
+
+    pub fn deinit(self: Event, allocator: mem.Allocator) void {
+        if (self.filename) |name| {
+            allocator.free(name);
+        }
+        allocator.free(self.watched);
+    }
+};
+
 pub const WatchMap = std.AutoArrayHashMapUnmanaged(i32, []const u8);
 
 pub const INotifyInitError = posix.INotifyInitError;
 pub const WatchInitError = mem.Allocator.Error || INotifyInitError;
 pub const INotifyAddWatchError = posix.INotifyAddWatchError;
+
 pub const AddWatchError = error{
     UnsupportedRelativePath,
 } || INotifyAddWatchError || mem.Allocator.Error;
+
+pub const NextEventError = error{
+    WatchNotFound,
+} || posix.ReadError || mem.Allocator.Error;
 
 pub const Watch = struct {
     inotify: Inotify,
@@ -46,13 +70,13 @@ pub const Watch = struct {
     }
 
     /// Does not add watch if pathname is already watched.
-    /// TODO: Make relative path absolute path without realpath() somehow.
     pub fn addWatch(
         self: *Watch,
         allocator: mem.Allocator,
         pathname: []const u8,
         mask: EventFlags,
     ) AddWatchError!void {
+        // TODO: Make relative path absolute path without realpath() somehow.
         const resolved = try path.resolvePosix(allocator, &.{pathname});
         errdefer allocator.free(resolved);
 
@@ -69,6 +93,42 @@ pub const Watch = struct {
         if (!entry.found_existing) {
             entry.value_ptr.* = resolved;
         }
+    }
+
+    /// Returns the next event.
+    /// Blocks unless non blocking option is set.
+    /// Event lifetime is orthognal to Watch's. Caller must deinit
+    /// each event.
+    pub fn nextEvent(self: *Watch, allocator: mem.Allocator) NextEventError!Event {
+        var buf: [@sizeOf(INotifyEvent) + posix.NAME_MAX + 1]u8 = undefined;
+        const nread = try posix.read(self.inotify.fd, &buf);
+
+        if (nread == 0) {
+            @branchHint(.cold);
+            unreachable; // only happens before Linux 2.6.21 when buffer is too small.
+        }
+
+        const event: *INotifyEvent = @alignCast(@ptrCast(buf[0..@sizeOf(INotifyEvent)]));
+
+        const maybe_name = event.getName();
+
+        const watch = self.map.get(event.wd) orelse return NextEventError.WatchNotFound;
+        const watch_copy = try allocator.dupe(u8, watch);
+        errdefer allocator.free(watch_copy);
+
+        var filename: ?[]const u8 = undefined;
+        if (maybe_name) |name| {
+            filename = try allocator.dupe(u8, name);
+        } else {
+            filename = null;
+        }
+
+        return .{
+            .flags = @bitCast(event.mask),
+            .move_cookie = event.cookie,
+            .watched = watch_copy,
+            .filename = filename,
+        };
     }
 };
 
@@ -101,14 +161,14 @@ test Watch {
         std.debug.print("{s}\n", .{val});
     }
 
-    var buf: [@sizeOf(INotifyEvent) + posix.NAME_MAX + 1]u8 = undefined;
-    const nread = try posix.read(watch.inotify.fd, &buf);
-    try testing.expectEqual(32, nread);
+    const event = try watch.nextEvent(testing.allocator);
+    defer event.deinit(testing.allocator);
 
-    const event: *INotifyEvent = @alignCast(@ptrCast(buf[0..@sizeOf(INotifyEvent)]));
-    const dir_in_map = watch.map.get(event.wd) orelse return error.UnexpectedNull;
-    try testing.expectEqualStrings(watch_dir, dir_in_map);
-    try testing.expectEqualStrings("watched_file", event.getName().?);
+    try testing.expectEqualStrings(watch_dir, event.watched);
+    try testing.expectEqualStrings("watched_file", event.filename.?);
+    try testing.expectEqual(0, event.move_cookie);
+    try testing.expectEqual(EventFlags{.in_open = true}, event.flags);
+    try testing.expectError(error.WouldBlock, watch.nextEvent(testing.allocator));
 }
 
 const Inotify = struct {

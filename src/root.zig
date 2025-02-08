@@ -93,19 +93,10 @@ test Watch {
     const nread = try posix.read(watch.inotify.fd, &buf);
     try testing.expectEqual(32, nread);
 
-    const event = &mem.bytesToValue(INotifyEvent, buf[0..@sizeOf(INotifyEvent)]);
+    const event: *INotifyEvent = @alignCast(@ptrCast(buf[0..@sizeOf(INotifyEvent)]));
     const expected_wd = watch.map.get(watch_dir).?;
     try testing.expectEqual(expected_wd, event.wd);
-
-    std.debug.print("full buffer = {s}\n", .{buf});
-    std.debug.print("nread = {d}\n", .{nread});
-    std.debug.print("event struct size = {d}\n", .{@sizeOf(INotifyEvent)});
-    std.debug.print("name len = {d}\n\n", .{event.len});
-
-    const name_aligned: [:0]const u8 = buf[@sizeOf(INotifyEvent)..nread :0];
-    const name_many: [*:0]const u8 = name_aligned.ptr;
-    const name: [:0]const u8 = mem.span(name_many);
-    std.debug.print("expected: {s}, actual: {?s}\n", .{ name, event.getName() });
+    try testing.expectEqualStrings("watched_file", event.getName().?);
 }
 
 pub const Inotify = struct {

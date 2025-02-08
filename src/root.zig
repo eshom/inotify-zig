@@ -111,17 +111,17 @@ test Watch {
     try testing.expectEqualStrings("watched_file", event.getName().?);
 }
 
-pub const Inotify = struct {
+const Inotify = struct {
     fd: i32,
 
-    pub fn init(flags: InitFlags) INotifyInitError!Inotify {
+    fn init(flags: InitFlags) INotifyInitError!Inotify {
         const fd = try posix.inotify_init1(@bitCast(flags));
         return .{
             .fd = fd,
         };
     }
 
-    pub fn deinit(self: Inotify) void {
+    fn deinit(self: Inotify) void {
         // TODO: Needs fsync?
         posix.close(self.fd);
     }

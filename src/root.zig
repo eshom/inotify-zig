@@ -7,7 +7,7 @@ const process = std.process;
 
 const INotifyEvent = std.os.linux.inotify_event;
 
-pub const WatchMap = std.StringArrayHashMapUnmanaged(i32);
+pub const WatchMap = std.AutoArrayHashMapUnmanaged(i32, []const u8);
 
 pub const INotifyInitError = posix.INotifyInitError;
 pub const WatchInitError = mem.Allocator.Error || INotifyInitError;
@@ -30,13 +30,13 @@ pub const Watch = struct {
         return watch;
     }
 
-    /// Frees the backing map including the keys.
+    /// Frees the backing map including the values.
     /// Closes the inotify instance.
     /// Frees itself.
     pub fn deinit(self: *Watch, allocator: mem.Allocator) void {
-        const keys = self.map.keys();
-        for (keys) |k| {
-            allocator.free(k);
+        const values = self.map.values();
+        for (values) |v| {
+            allocator.free(v);
         }
         self.map.deinit(allocator);
         self.inotify.deinit();
@@ -57,9 +57,9 @@ pub const Watch = struct {
             resolved,
             @bitCast(mask),
         );
-        const entry = try self.map.getOrPut(allocator, resolved);
+        const entry = try self.map.getOrPut(allocator, wd);
         if (!entry.found_existing) {
-            entry.value_ptr.* = wd;
+            entry.value_ptr.* = resolved;
         }
     }
 };
@@ -85,8 +85,8 @@ test Watch {
     testing.allocator.free(touch.stderr);
     testing.allocator.free(touch.stdout);
 
-    for (watch.map.keys()) |key| {
-        std.debug.print("{s}\n", .{key});
+    for (watch.map.values()) |val| {
+        std.debug.print("{s}\n", .{val});
     }
 
     var buf: [@sizeOf(INotifyEvent) + posix.NAME_MAX + 1]u8 = @splat(0);
@@ -94,8 +94,8 @@ test Watch {
     try testing.expectEqual(32, nread);
 
     const event: *INotifyEvent = @alignCast(@ptrCast(buf[0..@sizeOf(INotifyEvent)]));
-    const expected_wd = watch.map.get(watch_dir).?;
-    try testing.expectEqual(expected_wd, event.wd);
+    const dir_in_map = watch.map.get(event.wd) orelse return error.UnexpectedNull;
+    try testing.expectEqualStrings(watch_dir, dir_in_map);
     try testing.expectEqualStrings("watched_file", event.getName().?);
 }
 

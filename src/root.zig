@@ -85,7 +85,7 @@ pub const EventFlags = packed struct(u32) {
     in_isdir: bool = false, // Event occuurred against dir.
     in_oneshot: bool = false, // Only send event once.
 
-    pub const watchables: EventFlags = .{
+    pub const all: EventFlags = .{
         .in_access = true,
         .in_modify = true,
         .in_attrib = true,
@@ -98,22 +98,6 @@ pub const EventFlags = packed struct(u32) {
         .in_delete = true,
         .in_delete_self = true,
         .in_move_self = true,
-    };
-
-    pub const specials: EventFlags = .{
-        .in_dont_follow = true,
-        .in_excl_unlink = true,
-        .in_mask_add = true,
-        .in_oneshot = true,
-        .in_onlydir = true,
-        .in_mask_create = true,
-    };
-
-    pub const returnables: EventFlags = .{
-        .in_ignored = true,
-        .in_isdir = true,
-        .in_q_overflow = true,
-        .in_unmount = true,
     };
 
     pub const in_close: EventFlags = .{

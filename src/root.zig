@@ -12,7 +12,9 @@ pub const WatchMap = std.AutoArrayHashMapUnmanaged(i32, []const u8);
 pub const INotifyInitError = posix.INotifyInitError;
 pub const WatchInitError = mem.Allocator.Error || INotifyInitError;
 pub const INotifyAddWatchError = posix.INotifyAddWatchError;
-pub const AddWatchError = INotifyAddWatchError || mem.Allocator.Error;
+pub const AddWatchError = error{
+    UnsupportedRelativePath,
+} || INotifyAddWatchError || mem.Allocator.Error;
 
 pub const Watch = struct {
     inotify: Inotify,
@@ -44,7 +46,7 @@ pub const Watch = struct {
     }
 
     /// Does not add watch if pathname is already watched.
-    /// TODO: Resolve path to absolute path to avoid duplicate watch entries
+    /// TODO: Make relative path absolute path without realpath() somehow.
     pub fn addWatch(
         self: *Watch,
         allocator: mem.Allocator,
@@ -52,6 +54,12 @@ pub const Watch = struct {
         mask: EventFlags,
     ) AddWatchError!void {
         const resolved = try path.resolvePosix(allocator, &.{pathname});
+        errdefer allocator.free(resolved);
+
+        if (!path.isAbsolutePosix(resolved)) {
+            return AddWatchError.UnsupportedRelativePath;
+        }
+
         const wd = try posix.inotify_add_watch(
             self.inotify.fd,
             resolved,
@@ -68,7 +76,11 @@ test Watch {
     const watch: *Watch = try .init(testing.allocator, .non_blocking);
     defer watch.deinit(testing.allocator);
 
-    const watch_dir = "test/watched";
+    var pathbuf: [posix.PATH_MAX]u8 = undefined;
+    const cwd = try posix.getcwd(&pathbuf);
+    const watch_subdir = "test/watched";
+    const watch_dir = try path.join(testing.allocator, &.{ cwd, watch_subdir });
+    defer testing.allocator.free(watch_dir);
 
     try watch.addWatch(
         testing.allocator,
@@ -89,7 +101,7 @@ test Watch {
         std.debug.print("{s}\n", .{val});
     }
 
-    var buf: [@sizeOf(INotifyEvent) + posix.NAME_MAX + 1]u8 = @splat(0);
+    var buf: [@sizeOf(INotifyEvent) + posix.NAME_MAX + 1]u8 = undefined;
     const nread = try posix.read(watch.inotify.fd, &buf);
     try testing.expectEqual(32, nread);
 

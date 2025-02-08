@@ -1,13 +1,117 @@
 const std = @import("std");
 const testing = std.testing;
 const posix = std.posix;
+const mem = std.mem;
+const path = std.fs.path;
+const process = std.process;
 
-const InotifyInitError = posix.INotifyInitError;
+const INotifyEvent = std.os.linux.inotify_event;
+
+pub const WatchMap = std.StringArrayHashMapUnmanaged(i32);
+
+pub const INotifyInitError = posix.INotifyInitError;
+pub const WatchInitError = mem.Allocator.Error || INotifyInitError;
+pub const INotifyAddWatchError = posix.INotifyAddWatchError;
+pub const AddWatchError = INotifyAddWatchError || mem.Allocator.Error;
+
+pub const Watch = struct {
+    inotify: Inotify,
+    map: WatchMap,
+
+    pub fn init(
+        allocator: mem.Allocator,
+        flags: InitFlags,
+    ) WatchInitError!*Watch {
+        const inotify: Inotify = try .init(flags);
+        const watchmap: WatchMap = .empty;
+        var watch = try allocator.create(Watch);
+        watch.inotify = inotify;
+        watch.map = watchmap;
+        return watch;
+    }
+
+    /// Frees the backing map including the keys.
+    /// Closes the inotify instance.
+    /// Frees itself.
+    pub fn deinit(self: *Watch, allocator: mem.Allocator) void {
+        const keys = self.map.keys();
+        for (keys) |k| {
+            allocator.free(k);
+        }
+        self.map.deinit(allocator);
+        self.inotify.deinit();
+        allocator.destroy(self);
+    }
+
+    /// Does not add watch if pathname is already watched.
+    /// TODO: Resolve path to absolute path to avoid duplicate watch entries
+    pub fn addWatch(
+        self: *Watch,
+        allocator: mem.Allocator,
+        pathname: []const u8,
+        mask: EventFlags,
+    ) AddWatchError!void {
+        const resolved = try path.resolvePosix(allocator, &.{pathname});
+        const wd = try posix.inotify_add_watch(
+            self.inotify.fd,
+            resolved,
+            @bitCast(mask),
+        );
+        const entry = try self.map.getOrPut(allocator, resolved);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = wd;
+        }
+    }
+};
+
+test Watch {
+    const watch: *Watch = try .init(testing.allocator, .non_blocking);
+    defer watch.deinit(testing.allocator);
+
+    const watch_dir = "test/watched";
+
+    try watch.addWatch(
+        testing.allocator,
+        watch_dir,
+        .{ .in_open = true },
+    );
+
+    const touch = try process.Child.run(
+        .{
+            .allocator = testing.allocator,
+            .argv = &.{ "touch", "test/watched/watched_file" },
+        },
+    );
+    testing.allocator.free(touch.stderr);
+    testing.allocator.free(touch.stdout);
+
+    for (watch.map.keys()) |key| {
+        std.debug.print("{s}\n", .{key});
+    }
+
+    var buf: [@sizeOf(INotifyEvent) + posix.NAME_MAX + 1]u8 = @splat(0);
+    const nread = try posix.read(watch.inotify.fd, &buf);
+    try testing.expectEqual(32, nread);
+
+    const event = &mem.bytesToValue(INotifyEvent, buf[0..@sizeOf(INotifyEvent)]);
+    const expected_wd = watch.map.get(watch_dir).?;
+    try testing.expectEqual(expected_wd, event.wd);
+
+    std.debug.print("full buffer = {s}\n", .{buf});
+    std.debug.print("nread = {d}\n", .{nread});
+    std.debug.print("event struct size = {d}\n", .{@sizeOf(INotifyEvent)});
+    std.debug.print("name len = {d}\n\n", .{event.len});
+
+    const name_aligned: [:0]const u8 = buf[@sizeOf(INotifyEvent)..nread :0];
+    const name_many: [*:0]const u8 = name_aligned.ptr;
+    const name: [:0]const u8 = mem.span(name_many);
+    std.debug.print("expected: {s}, actual: {?s}\n", .{ name, event.getName() });
+}
 
 pub const Inotify = struct {
     fd: i32,
 
-    pub fn init(flags: InitFlags) InotifyInitError!Inotify {
+    pub fn init(flags: InitFlags) INotifyInitError!Inotify {
         const fd = try posix.inotify_init1(@bitCast(flags));
         return .{
             .fd = fd,
@@ -52,6 +156,8 @@ pub const InitFlags = packed struct(u32) {
 
 // TODO: Make flags doc clearer.
 // take from manual when calrification is warranted.
+//
+// TODO: Fix and test for big endian
 
 /// Flags used by inotify.
 /// See manual `inotify(7)` for details.

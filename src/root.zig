@@ -167,7 +167,7 @@ test Watch {
     try testing.expectEqualStrings(watch_dir, event.watched);
     try testing.expectEqualStrings("watched_file", event.filename.?);
     try testing.expectEqual(0, event.move_cookie);
-    try testing.expectEqual(EventFlags{.in_open = true}, event.flags);
+    try testing.expectEqual(EventFlags{ .in_open = true }, event.flags);
     try testing.expectError(error.WouldBlock, watch.nextEvent(testing.allocator));
 }
 

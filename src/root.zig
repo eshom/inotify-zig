@@ -4,8 +4,9 @@ const posix = std.posix;
 const mem = std.mem;
 const path = std.fs.path;
 const process = std.process;
-
 const INotifyEvent = std.os.linux.inotify_event;
+pub const INotifyInitError = posix.INotifyInitError;
+pub const INotifyAddWatchError = posix.INotifyAddWatchError;
 
 /// watched: the path associated with the event
 /// flags: flags of the associated event
@@ -28,10 +29,7 @@ pub const Event = struct {
 
 pub const WatchMap = std.AutoArrayHashMapUnmanaged(i32, []const u8);
 
-pub const INotifyInitError = posix.INotifyInitError;
 pub const WatchInitError = mem.Allocator.Error || INotifyInitError;
-pub const INotifyAddWatchError = posix.INotifyAddWatchError;
-
 pub const AddWatchError = error{
     UnsupportedRelativePath,
 } || INotifyAddWatchError || mem.Allocator.Error;
@@ -95,6 +93,22 @@ pub const Watch = struct {
         }
     }
 
+    /// Does nothing if watch doesn't exist.
+    /// Removing a watch causes an `.in_ignored` event to be generated.
+    pub fn removeWatch(self: *Watch, pathname: []const u8) void {
+        const wds = self.map.keys();
+        const paths = self.map.values();
+
+        // TODO: A version of this where user provides wd key directly would
+        // be faster.
+        for (wds, paths) |w, p| {
+            if (std.mem.eql(u8, p, pathname)) {
+                posix.inotify_rm_watch(self.inotify.fd, w);
+                break;
+            }
+        }
+    }
+
     /// Returns the next event.
     /// Blocks unless non blocking option is set.
     /// Event lifetime is orthognal to Watch's. Caller must deinit
@@ -109,7 +123,6 @@ pub const Watch = struct {
         }
 
         const event: *INotifyEvent = @alignCast(@ptrCast(buf[0..@sizeOf(INotifyEvent)]));
-
         const maybe_name = event.getName();
 
         const watch = self.map.get(event.wd) orelse return NextEventError.WatchNotFound;
@@ -145,7 +158,7 @@ test Watch {
     try watch.addWatch(
         testing.allocator,
         watch_dir,
-        .{ .in_open = true },
+        .{ .in_open = true, .in_ignored = true },
     );
 
     const touch = try process.Child.run(
@@ -164,10 +177,15 @@ test Watch {
     const event = try watch.nextEvent(testing.allocator);
     defer event.deinit(testing.allocator);
 
+    watch.removeWatch(watch_dir);
+    const event_ignored = try watch.nextEvent(testing.allocator);
+    defer event_ignored.deinit(testing.allocator);
+
     try testing.expectEqualStrings(watch_dir, event.watched);
     try testing.expectEqualStrings("watched_file", event.filename.?);
     try testing.expectEqual(0, event.move_cookie);
     try testing.expectEqual(EventFlags{ .in_open = true }, event.flags);
+    try testing.expectEqual(EventFlags{ .in_ignored = true }, event_ignored.flags);
     try testing.expectError(error.WouldBlock, watch.nextEvent(testing.allocator));
 }
 

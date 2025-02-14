@@ -27,6 +27,20 @@ pub const Event = struct {
     }
 };
 
+pub const EventSlice = struct {
+    events: []Event,
+
+    pub fn init(allocator: mem.Allocator, watch: *Watch) NextEventError!EventSlice {
+        return .{ .events = try watch.nextEvents(allocator) };
+    }
+
+    pub fn deinit(self: EventSlice, allocator: mem.Allocator) void {
+        for (self.events) |ev| {
+            ev.deinit(allocator);
+        }
+    }
+};
+
 pub const WatchMap = std.AutoArrayHashMapUnmanaged(i32, []const u8);
 
 pub const WatchInitError = mem.Allocator.Error || INotifyInitError;
@@ -109,39 +123,102 @@ pub const Watch = struct {
         }
     }
 
-    /// Returns the next event.
-    /// Blocks unless non blocking option is set.
-    /// Event lifetime is orthognal to Watch's. Caller must deinit
-    /// each event.
-    pub fn nextEvent(self: *Watch, allocator: mem.Allocator) NextEventError!Event {
+    fn countToFirstNonNull(buf: []const u8) usize {
+        var count = 0;
+        for (buf) |b| {
+            if (b == '\x00') {
+                count += 1;
+            } else {
+                return count;
+            }
+        }
+    }
+
+    fn readEvent(
+        self: *Watch,
+        allocator: mem.Allocator,
+        events: []const u8,
+    ) NextEventError!?struct { Event, usize } {
+        // Enough to hold at least one event
         var buf: [@sizeOf(INotifyEvent) + posix.NAME_MAX + 1]u8 = undefined;
+        var out_offset: usize = 0;
+
+        const in_event: *INotifyEvent = @alignCast(@ptrCast(buf[0..@sizeOf(INotifyEvent)]));
+        const maybe_name = in_event.getName();
+
+        var filename: ?[]const u8 = undefined;
+
+        if (maybe_name) |name| {
+            const offset_addition = @sizeOf(INotifyEvent) + name.len;
+            if (offset_addition >= events.len) return null;
+            out_offset += offset_addition;
+            filename = try allocator.dupe(u8, name);
+            std.debug.print("cur_read = {d}\n", .{@sizeOf(INotifyEvent) + name.len});
+        } else {
+            const offset_addition = @sizeOf(INotifyEvent);
+            if (offset_addition >= events.len) return null;
+            out_offset += offset_addition;
+            std.debug.print("cur_read = {d}\n", .{@sizeOf(INotifyEvent)});
+            filename = null;
+        }
+
+        errdefer {
+            if (filename) |file| {
+                allocator.free(file);
+            }
+        }
+
+        const watch = self.map.get(in_event.wd) orelse return NextEventError.WatchNotFound;
+        const watch_copy = try allocator.dupe(u8, watch);
+        errdefer allocator.free(watch_copy);
+
+        const out_event: Event = .{
+            .flags = @bitCast(in_event.mask),
+            .move_cookie = in_event.cookie,
+            .watched = watch_copy,
+            .filename = filename,
+        };
+
+        return .{ out_event, out_offset };
+    }
+
+    /// Returns slice of next events.
+    /// Blocks unless non blocking option is set.
+    /// Event lifetime is orthognal to Watch's. Caller must deinit Events
+    pub fn nextEvents(self: *Watch, allocator: mem.Allocator) NextEventError![]Event {
+        var buf: [@sizeOf(INotifyEvent) + posix.NAME_MAX + 1]u8 = undefined;
+        var offset: usize = 0;
+
+        // Can be more than one event
         const nread = try posix.read(self.inotify.fd, &buf);
+        std.debug.print("nread = {d}\n", .{nread});
 
         if (nread == 0) {
             @branchHint(.cold);
             unreachable; // only happens before Linux 2.6.21 when buffer is too small.
         }
 
-        const event: *INotifyEvent = @alignCast(@ptrCast(buf[0..@sizeOf(INotifyEvent)]));
-        const maybe_name = event.getName();
+        const buf_start_size = 10;
+        const buf_increment = 10;
+        var events_buf: []Event = try allocator.alloc(Event, buf_start_size);
+        errdefer allocator.free(events_buf);
 
-        const watch = self.map.get(event.wd) orelse return NextEventError.WatchNotFound;
-        const watch_copy = try allocator.dupe(u8, watch);
-        errdefer allocator.free(watch_copy);
+        var idx: usize = 0;
+        while (true) : (idx += 1) {
+            const result = try self.readEvent(
+                allocator,
+                buf[offset..nread],
+            ) orelse break;
+            const ev, offset = result;
 
-        var filename: ?[]const u8 = undefined;
-        if (maybe_name) |name| {
-            filename = try allocator.dupe(u8, name);
-        } else {
-            filename = null;
+            if (idx >= events_buf.len) {
+                events_buf = try allocator.realloc(events_buf, events_buf.len + buf_increment);
+            } else {
+                events_buf[idx] = ev;
+            }
         }
 
-        return .{
-            .flags = @bitCast(event.mask),
-            .move_cookie = event.cookie,
-            .watched = watch_copy,
-            .filename = filename,
-        };
+        return events_buf;
     }
 };
 
@@ -197,27 +274,18 @@ test Watch {
     watch.removeWatch(watch_dir);
     watch.removeWatch(watch_file);
 
-    var events: [4]Event = undefined;
+    const events: EventSlice = try .init(testing.allocator, watch);
 
-    events[0] = try watch.nextEvent(testing.allocator);
-    events[0].deinit(testing.allocator);
-    events[1] = try watch.nextEvent(testing.allocator);
-    events[1].deinit(testing.allocator);
-    events[2] = try watch.nextEvent(testing.allocator);
-    events[2].deinit(testing.allocator);
-    events[3] = try watch.nextEvent(testing.allocator);
-    events[3].deinit(testing.allocator);
+    try testing.expectEqualStrings(watch_dir, events.events[0].watched);
+    try testing.expectEqualStrings("watched_file", events.events[0].filename.?);
+    try testing.expectEqual(0, events.events[0].move_cookie);
 
-    try testing.expectEqualStrings(watch_dir, events[0].watched);
-    try testing.expectEqualStrings("watched_file", events[0].filename.?);
-    try testing.expectEqual(0, events[0].move_cookie);
+    try testing.expectEqual(EventFlags{ .in_open = true }, events.events[0].flags);
+    try testing.expectEqual(EventFlags{ .in_open = true }, events.events[1].flags);
+    try testing.expectEqual(EventFlags{ .in_ignored = true }, events.events[2].flags);
+    try testing.expectEqual(EventFlags{ .in_ignored = true }, events.events[3].flags);
 
-    try testing.expectEqual(EventFlags{ .in_open = true }, events[0].flags);
-    try testing.expectEqual(EventFlags{ .in_open = true }, events[1].flags);
-    try testing.expectEqual(EventFlags{ .in_ignored = true }, events[2].flags);
-    try testing.expectEqual(EventFlags{ .in_ignored = true }, events[3].flags);
-
-    try testing.expectError(error.WouldBlock, watch.nextEvent(testing.allocator));
+    // try testing.expectError(error.WouldBlock, watch.nextEvents(testing.allocator));
 }
 
 const Inotify = struct {

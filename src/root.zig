@@ -151,13 +151,28 @@ test Watch {
 
     var pathbuf: [posix.PATH_MAX]u8 = undefined;
     const cwd = try posix.getcwd(&pathbuf);
-    const watch_subdir = "test/watched";
-    const watch_dir = try path.join(testing.allocator, &.{ cwd, watch_subdir });
+
+    const watch_dir = try path.join(testing.allocator, &.{
+        cwd,
+        "test/watched",
+    });
     defer testing.allocator.free(watch_dir);
+
+    const watch_file = try path.join(testing.allocator, &.{
+        watch_dir,
+        "watched_file2",
+    });
+    defer testing.allocator.free(watch_file);
 
     try watch.addWatch(
         testing.allocator,
         watch_dir,
+        .{ .in_open = true, .in_ignored = true },
+    );
+
+    try watch.addWatch(
+        testing.allocator,
+        watch_file,
         .{ .in_open = true, .in_ignored = true },
     );
 
@@ -170,22 +185,38 @@ test Watch {
     testing.allocator.free(touch.stderr);
     testing.allocator.free(touch.stdout);
 
-    for (watch.map.values()) |val| {
-        std.debug.print("{s}\n", .{val});
-    }
-
-    const event = try watch.nextEvent(testing.allocator);
-    defer event.deinit(testing.allocator);
+    const touch2 = try process.Child.run(
+        .{
+            .allocator = testing.allocator,
+            .argv = &.{ "touch", "test/watched/watched_file2" },
+        },
+    );
+    testing.allocator.free(touch2.stderr);
+    testing.allocator.free(touch2.stdout);
 
     watch.removeWatch(watch_dir);
-    const event_ignored = try watch.nextEvent(testing.allocator);
-    defer event_ignored.deinit(testing.allocator);
+    watch.removeWatch(watch_file);
 
-    try testing.expectEqualStrings(watch_dir, event.watched);
-    try testing.expectEqualStrings("watched_file", event.filename.?);
-    try testing.expectEqual(0, event.move_cookie);
-    try testing.expectEqual(EventFlags{ .in_open = true }, event.flags);
-    try testing.expectEqual(EventFlags{ .in_ignored = true }, event_ignored.flags);
+    var events: [4]Event = undefined;
+
+    events[0] = try watch.nextEvent(testing.allocator);
+    events[0].deinit(testing.allocator);
+    events[1] = try watch.nextEvent(testing.allocator);
+    events[1].deinit(testing.allocator);
+    events[2] = try watch.nextEvent(testing.allocator);
+    events[2].deinit(testing.allocator);
+    events[3] = try watch.nextEvent(testing.allocator);
+    events[3].deinit(testing.allocator);
+
+    try testing.expectEqualStrings(watch_dir, events[0].watched);
+    try testing.expectEqualStrings("watched_file", events[0].filename.?);
+    try testing.expectEqual(0, events[0].move_cookie);
+
+    try testing.expectEqual(EventFlags{ .in_open = true }, events[0].flags);
+    try testing.expectEqual(EventFlags{ .in_open = true }, events[1].flags);
+    try testing.expectEqual(EventFlags{ .in_ignored = true }, events[2].flags);
+    try testing.expectEqual(EventFlags{ .in_ignored = true }, events[3].flags);
+
     try testing.expectError(error.WouldBlock, watch.nextEvent(testing.allocator));
 }
 

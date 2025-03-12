@@ -223,6 +223,7 @@ pub const Watch = struct {
 };
 
 test Watch {
+    @breakpoint();
     const watch: *Watch = try .init(testing.allocator, .non_blocking);
     defer watch.deinit(testing.allocator);
 

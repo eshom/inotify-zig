@@ -25,7 +25,7 @@ pub const Watch = struct {
     fd: EventQueueFD,
     watches: std.ArrayListUnmanaged(WatchDescriptor),
     paths: std.ArrayListUnmanaged([]const u8),
-    removed: std.ArrayListUnmanaged(bool),
+    ignored: std.ArrayListUnmanaged(bool),
 
     pub fn init(
         allocator: mem.Allocator,
@@ -43,7 +43,7 @@ pub const Watch = struct {
             .fd = fd,
             .watches = .empty,
             .paths = .empty,
-            .removed = .empty,
+            .ignored = .empty,
         };
         return watch;
     }
@@ -55,7 +55,7 @@ pub const Watch = struct {
 
         self.paths.deinit(allocator);
         self.watches.deinit(allocator);
-        self.removed.deinit(allocator);
+        self.ignored.deinit(allocator);
 
         posix.close(@intFromEnum(self.fd));
 
@@ -95,19 +95,22 @@ pub const Watch = struct {
             allocator.free(w);
         }
 
-        try self.removed.append(allocator, false);
+        try self.ignored.append(allocator, false);
     }
 
-    /// Remove watch with either `WatchDescriptor` or `[]const u8`.
+    /// Remove watch with either `WatchDescriptor` or `[]u8`.
     /// Sends `.in_ignored` event to the queue.
     pub fn remove(self: *Watch, watch_or_path: anytype) void {
+        const panic_str = "Trying to remove a watch but there are no wathes left.";
+
         const T = @TypeOf(watch_or_path);
         switch (T) {
-            []const u8 => |str| {
+            []const u8, []u8 => {
+                const str: T = watch_or_path;
                 for (
                     self.paths.items,
                     self.watches.items,
-                    self.removed.items,
+                    self.ignored.items,
                     0..,
                 ) |pth, wth, rm, idx| {
                     if (!rm and mem.eql(u8, pth, str)) {
@@ -115,16 +118,21 @@ pub const Watch = struct {
                             @intFromEnum(self.fd),
                             @intFromEnum(wth),
                         );
-                        self.removed.items[idx] = true;
+                        self.ignored.items[idx] = true;
+                        break;
                     }
+                } else {
+                    @branchHint(.cold);
+                    debug.panic("{s}\n", .{panic_str});
                 }
             },
             //TODO: Binary search instead of linear. The watch descriptors
             // are in increasing order.
-            WatchDescriptor => |wd| {
+            WatchDescriptor => {
+                const wd: T = watch_or_path;
                 for (
                     self.watches.items,
-                    self.removed.items,
+                    self.ignored.items,
                     0..,
                 ) |wth, rm, idx| {
                     if (!rm and wd == wth) {
@@ -132,11 +140,15 @@ pub const Watch = struct {
                             @intFromEnum(self.fd),
                             @intFromEnum(wth),
                         );
-                        self.removed.items[idx] = true;
+                        self.ignored.items[idx] = true;
+                        break;
                     }
+                } else {
+                    @branchHint(.cold);
+                    debug.panic("{s}\n", .{panic_str});
                 }
             },
-            else => @compileError("Expected either `[]const u8` or `WatchDescriptor`. Found " ++ fmt.comptimePrint("{}", .{T})),
+            else => @compileError(fmt.comptimePrint("Expected either `[]const u8` or `WatchDescriptor`, found {}\n", .{T})),
         }
     }
 };
@@ -147,7 +159,7 @@ test "init and deinit inotify" {
     defer watch.deinit(testing.allocator);
 }
 
-test "add a watch" {
+test "add and remove watches" {
     const watch: *Watch = try .init(testing.allocator, .empty);
     defer watch.deinit(testing.allocator);
 
@@ -190,6 +202,14 @@ test "add a watch" {
         watch.paths.items[1],
     });
     try testing.expectEqualStrings(expected_path2, watch.paths.items[1]);
+
+    try testing.expectEqualSlices(bool, &.{ false, false }, watch.ignored.items);
+
+    watch.remove(expected_path);
+    try testing.expectEqualSlices(bool, &.{ true, false }, watch.ignored.items);
+
+    watch.remove(@as(WatchDescriptor, @enumFromInt(2)));
+    try testing.expectEqualSlices(bool, &.{ true, true }, watch.ignored.items);
 }
 
 test {

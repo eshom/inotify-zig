@@ -8,6 +8,7 @@ const mem = std.mem;
 const path = std.fs.path;
 const process = std.process;
 const fmt = std.fmt;
+const sort = std.sort;
 const INotifyEvent = linux.inotify_event;
 
 pub const flags = @import("flags.zig");
@@ -102,7 +103,7 @@ pub const Watch = struct {
         );
         errdefer posix.inotify_rm_watch(@intFromEnum(self.fd), wd);
 
-        const idx_maybe = std.sort.binarySearch(
+        const idx_maybe = sort.binarySearch(
             WatchDescriptor,
             self.watches.items,
             @as(WatchDescriptor, @enumFromInt(wd)),
@@ -138,11 +139,13 @@ pub const Watch = struct {
     /// Remove watch with either `WatchDescriptor` or `[]u8`.
     /// Sends `.in_ignored` event to the queue.
     pub fn remove(self: *Watch, watch_or_path: anytype) void {
-        const panic_str = "Trying to remove a watch but there are no wathes left.";
-
         const T = @TypeOf(watch_or_path);
-        switch (T) {
-            []const u8, []u8 => {
+        const info = @typeInfo(T);
+        switch (info) {
+            .pointer => {
+                // TODO: Find a better way to validate a string-like type
+                const is_a_string: []const u8 = watch_or_path;
+                _ = is_a_string;
                 const str: T = watch_or_path;
                 for (
                     self.paths.items,
@@ -160,32 +163,32 @@ pub const Watch = struct {
                     }
                 } else {
                     @branchHint(.cold);
-                    debug.panic("{s}\n", .{panic_str});
+                    debug.panic("Could not find a watch associated with path: {s}\n", .{str});
                 }
             },
-            //TODO: Binary search instead of linear. The watch descriptors
-            // are in increasing order.
-            WatchDescriptor => {
+            .@"enum" => {
+                if (T != WatchDescriptor) {
+                    @compileError(fmt.comptimePrint("Expected `WatchDescriptor` type, found `{}`", .{T}));
+                }
                 const wd: T = watch_or_path;
-                for (
-                    self.watches.items,
-                    self.ignored.items,
-                    0..,
-                ) |wth, rm, idx| {
-                    if (!rm and wd == wth) {
+                const idx_maybe = sort.binarySearch(WatchDescriptor, self.watches.items, wd, comp);
+                if (idx_maybe) |idx| {
+                    if (self.ignored.items[idx]) {
+                        @branchHint(.cold);
+                        debug.panic("Trying to remove `{}`, but it was already removed.\n", .{self.watches.items[idx]});
+                    } else {
                         posix.inotify_rm_watch(
                             @intFromEnum(self.fd),
-                            @intFromEnum(wth),
+                            @intFromEnum(wd),
                         );
                         self.ignored.items[idx] = true;
-                        break;
                     }
                 } else {
                     @branchHint(.cold);
-                    debug.panic("{s}\n", .{panic_str});
+                    debug.panic("Could not find watch descriptor associted with `{}`\n", .{wd});
                 }
             },
-            else => @compileError(fmt.comptimePrint("Expected either `[]const u8` or `WatchDescriptor`, found {}\n", .{T})),
+            else => @compileError(fmt.comptimePrint("Expected either a string-like type or `WatchDescriptor`, found `{}`\n", .{T})),
         }
     }
 };

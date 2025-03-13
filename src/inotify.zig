@@ -1,4 +1,5 @@
 const std = @import("std");
+const math = std.math;
 const testing = std.testing;
 const posix = std.posix;
 const linux = std.os.linux;
@@ -24,6 +25,21 @@ pub const Watch = struct {
     watches: std.ArrayListUnmanaged(WatchDescriptor),
     paths: std.ArrayListUnmanaged([]const u8),
     ignored: std.ArrayListUnmanaged(bool),
+
+    fn comp(a: WatchDescriptor, b: WatchDescriptor) math.Order {
+        const a_ = @intFromEnum(a);
+        const b_ = @intFromEnum(b);
+        if (a_ == b_) {
+            return .eq;
+        } else if (a_ < b_) {
+            return .lt;
+        } else if (a_ > b_) {
+            return .gt;
+        } else {
+            @branchHint(.cold);
+            unreachable;
+        }
+    }
 
     pub fn init(
         allocator: mem.Allocator,
@@ -77,25 +93,46 @@ pub const Watch = struct {
         const watch_path = try path.resolve(allocator, &.{ cwd, pathname });
         errdefer allocator.free(watch_path);
 
-        const wd = try posix.inotify_add_watch(@intFromEnum(self.fd), watch_path, @bitCast(mask));
+        // For an inotify instance, wd values are never reused and keep increasing.
+        // This is why you cannot use them as indices to an array.
+        const wd = try posix.inotify_add_watch(
+            @intFromEnum(self.fd),
+            watch_path,
+            @bitCast(mask),
+        );
+        errdefer posix.inotify_rm_watch(@intFromEnum(self.fd), wd);
 
-        debug.assert(wd > 0 and wd <= self.paths.items.len + 1);
+        const idx_maybe = std.sort.binarySearch(
+            WatchDescriptor,
+            self.watches.items,
+            @as(WatchDescriptor, @enumFromInt(wd)),
+            comp,
+        );
 
-        try self.paths.append(allocator, watch_path);
-        errdefer {
-            debug.assert(self.paths.items.len > 0);
-            const str = self.paths.pop().?;
-            allocator.free(str);
+        if (idx_maybe) |idx| {
+            @branchHint(.unlikely);
+            // Watch already exists.
+            _ = idx;
+            allocator.free(watch_path);
+            return;
+        } else {
+            @branchHint(.likely);
+            try self.paths.append(allocator, watch_path);
+            errdefer {
+                debug.assert(self.paths.items.len > 0);
+                const str = self.paths.pop().?;
+                allocator.free(str);
+            }
+
+            try self.watches.append(allocator, @enumFromInt(wd));
+            errdefer {
+                debug.assert(self.paths.items.len > 0);
+                const w = self.paths.pop().?;
+                allocator.free(w);
+            }
+
+            try self.ignored.append(allocator, false);
         }
-
-        try self.watches.append(allocator, @enumFromInt(wd));
-        errdefer {
-            debug.assert(self.paths.items.len > 0);
-            const w = self.paths.pop().?;
-            allocator.free(w);
-        }
-
-        try self.ignored.append(allocator, false);
     }
 
     /// Remove watch with either `WatchDescriptor` or `[]u8`.
@@ -250,6 +287,21 @@ test "add and remove watches" {
     });
     try testing.expectEqual(3, @intFromEnum(watch.watches.items[2]));
     watch.remove(@as(WatchDescriptor, @enumFromInt(3)));
+}
+
+test "multiple watches for the same file" {
+    const watch: *Watch = try .init(testing.allocator, .empty);
+    defer watch.deinit(testing.allocator);
+    for (0..10) |idx| {
+        _ = idx;
+        try watch.add(
+            testing.allocator,
+            "test/watched/watched_file",
+            .{ .in_access = true },
+        );
+    }
+    try testing.expectEqual(1, watch.watches.items.len);
+    try testing.expectEqualSlices(bool, &.{false}, watch.ignored.items);
 }
 
 test {

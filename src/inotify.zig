@@ -19,8 +19,6 @@ pub const WatchDescriptor = enum(i32) {
     _,
 };
 
-// TODO: If watch descriptor is always increasing by one, `watches` and `paths`
-// can be simplified to just a single one-indexed array.
 pub const Watch = struct {
     fd: EventQueueFD,
     watches: std.ArrayListUnmanaged(WatchDescriptor),
@@ -62,6 +60,7 @@ pub const Watch = struct {
         allocator.destroy(self);
     }
 
+    // TODO: Test invalid path inputs (fuzz!)
     pub fn add(
         self: *Watch,
         allocator: mem.Allocator,
@@ -70,16 +69,17 @@ pub const Watch = struct {
     ) (posix.INotifyAddWatchError ||
         posix.GetCwdError ||
         mem.Allocator.Error)!void {
-        // TODO: Consider creating a buffer on the stack
-        const path_buf = try allocator.alloc(u8, posix.PATH_MAX);
-        defer allocator.free(path_buf);
+        var path_buf: [posix.PATH_MAX]u8 = undefined;
 
-        const cwd = try posix.getcwd(path_buf);
-        // TODO: Test invalid path inputs (fuzz!)
+        const cwd = try posix.getcwd(&path_buf);
+        if ((posix.PATH_MAX -| pathname.len -| cwd.len) == 0) return error.NameTooLong;
+
         const watch_path = try path.resolve(allocator, &.{ cwd, pathname });
         errdefer allocator.free(watch_path);
 
         const wd = try posix.inotify_add_watch(@intFromEnum(self.fd), watch_path, @bitCast(mask));
+
+        debug.assert(wd > 0 and wd <= self.paths.items.len + 1);
 
         try self.paths.append(allocator, watch_path);
         errdefer {
@@ -163,11 +163,22 @@ test "add and remove watches" {
     const watch: *Watch = try .init(testing.allocator, .empty);
     defer watch.deinit(testing.allocator);
 
+    try testing.expectError(
+        error.OutOfMemory,
+        Watch.init(testing.failing_allocator, .empty),
+    );
+
     try watch.add(
         testing.allocator,
         "test/watched/watched_file",
         .{ .in_access = true },
     );
+
+    try testing.expectError(error.OutOfMemory, watch.add(
+        testing.failing_allocator,
+        "test/watched/watched_file",
+        .{ .in_access = true },
+    ));
 
     try watch.add(
         testing.allocator,
@@ -202,14 +213,43 @@ test "add and remove watches" {
         watch.paths.items[1],
     });
     try testing.expectEqualStrings(expected_path2, watch.paths.items[1]);
-
     try testing.expectEqualSlices(bool, &.{ false, false }, watch.ignored.items);
+
+    const watch2: *Watch = try .init(testing.allocator, .empty);
+    defer watch2.deinit(testing.allocator);
+
+    try watch2.add(
+        testing.allocator,
+        "test/watched",
+        .{ .in_access = true },
+    );
+    std.debug.print("{d}: watched dir2 = {s}\n", .{
+        watch2.watches.items[0],
+        watch2.paths.items[0],
+    });
+    try testing.expectEqual(1, @intFromEnum(watch2.watches.items[0]));
 
     watch.remove(expected_path);
     try testing.expectEqualSlices(bool, &.{ true, false }, watch.ignored.items);
 
     watch.remove(@as(WatchDescriptor, @enumFromInt(2)));
     try testing.expectEqualSlices(bool, &.{ true, true }, watch.ignored.items);
+
+    watch2.remove(@as(WatchDescriptor, @enumFromInt(1)));
+    try testing.expectEqualSlices(bool, &.{true}, watch2.ignored.items);
+
+    try watch.add(
+        testing.allocator,
+        "test/watched/watched_file",
+        .{ .in_access = true },
+    );
+
+    std.debug.print("{d}: watched file = {s}\n", .{
+        watch.watches.items[2],
+        watch.paths.items[2],
+    });
+    try testing.expectEqual(3, @intFromEnum(watch.watches.items[2]));
+    watch.remove(@as(WatchDescriptor, @enumFromInt(3)));
 }
 
 test {

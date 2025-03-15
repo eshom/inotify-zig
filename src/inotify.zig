@@ -72,6 +72,13 @@ pub const Watch = struct {
         }
 
         self.entries.deinit(allocator);
+
+        for (self.events.items(.name)) |name| {
+            if (name) |str| {
+                allocator.free(str);
+            }
+        }
+
         self.events.deinit(allocator);
         posix.close(@intFromEnum(self.fd));
         allocator.destroy(self);
@@ -185,26 +192,39 @@ pub const Watch = struct {
         self: *Watch,
         allocator: mem.Allocator,
     ) (mem.Allocator.Error || posix.ReadError)!void {
-        _ = allocator;
         var buf: [4096]u8 = undefined;
         const n_bytes = try posix.read(@intFromEnum(self.fd), &buf);
-        debug.print("read bytes: {}\n", .{n_bytes});
+
         debug.assert(n_bytes > 0); // old kernels not supported
 
-        // const alignment = @alignOf(linux.inotify_event);
-
+        const event_size = @sizeOf(linux.inotify_event);
         var offset: usize = 0;
+
         while (offset < n_bytes) {
-            const event_bytes: []const u8 = buf[offset .. offset + @sizeOf(linux.inotify_event)];
-            offset += event_bytes.len;
-            const event: *const linux.inotify_event = @ptrCast(@alignCast(event_bytes));
-            debug.print("raw event: {} (size: {})\n", .{ event, @sizeOf(linux.inotify_event) });
-            debug.print("current offset before name: {}\n", .{offset});
-            // const name = event.getName();
+            const event_bytes: []const u8 = buf[offset .. offset + event_size];
+            offset += event_size;
+            const event: *align(1) const linux.inotify_event = @ptrCast(event_bytes);
+
+            const name: ?[:0]const u8 = if (event.len == 0) null else blk: {
+                const ptr: [*:0]const u8 = @ptrCast(event);
+                break :blk mem.span(ptr + event_size);
+            };
+
             offset += event.len;
-            // debug.print("name?: {s?}", .{name});
-            debug.print("current offset after name: {}\n", .{offset});
+
+            const name_copy = if (name) |str| try allocator.dupe(u8, str) else null;
+            errdefer if (name_copy) |str| allocator.free(str);
+
+            const event_out: INotifyEvent = .{
+                .wd = @enumFromInt(event.wd),
+                .mask = @bitCast(event.mask),
+                .cookie = event.cookie,
+                .name = name_copy,
+            };
+
+            try self.events.append(allocator, event_out);
         }
+        debug.assert(offset == n_bytes);
     }
 };
 
@@ -340,7 +360,6 @@ pub const INotifyEvent = struct {
     wd: WatchDescriptor,
     mask: flags.EventFlags,
     cookie: u32,
-    len: u32,
     name: ?[]const u8,
 };
 
@@ -348,11 +367,8 @@ test "read one file event from watched dir" {
     const watch: *Watch = try .init(testing.allocator, .non_blocking);
     defer watch.deinit(testing.allocator);
 
-    try watch.add(
-        testing.allocator,
-        "test/watched",
-        .{ .in_open = true },
-    );
+    try watch.add(testing.allocator, "test/watched", .{ .in_open = true });
+    try watch.add(testing.allocator, "test/watched/touched_file", .{ .in_open = true });
 
     const touch = try process.Child.run(.{
         .allocator = testing.allocator,

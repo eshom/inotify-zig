@@ -379,4 +379,13 @@ test "read one file event from watched dir" {
     defer testing.allocator.free(touch.stderr);
 
     try watch.readEvents(testing.allocator);
+
+    const expected: []const INotifyEvent = &.{
+        .{ .wd = @enumFromInt(1), .mask = .{ .in_open = true }, .cookie = 0, .name = "touched_file" },
+        .{ .wd = @enumFromInt(2), .mask = .{ .in_open = true }, .cookie = 0, .name = null },
+    };
+
+    for (0..watch.events.len) |idx| {
+        try testing.expectEqualDeep(expected[idx], watch.events.get(idx));
+    }
 }

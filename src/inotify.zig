@@ -21,11 +21,15 @@ pub const WatchDescriptor = enum(i32) {
     _,
 };
 
+pub const WatchEntry = struct {
+    watch: WatchDescriptor,
+    path: []const u8,
+    ignored: bool,
+};
+
 pub const Watch = struct {
     fd: EventQueueFD,
-    watches: std.ArrayListUnmanaged(WatchDescriptor),
-    paths: std.ArrayListUnmanaged([]const u8),
-    ignored: std.ArrayListUnmanaged(bool),
+    entries: std.MultiArrayList(WatchEntry),
 
     fn comp(a: WatchDescriptor, b: WatchDescriptor) math.Order {
         const a_ = @intFromEnum(a);
@@ -56,24 +60,18 @@ pub const Watch = struct {
 
         watch.* = .{
             .fd = fd,
-            .watches = .empty,
-            .paths = .empty,
-            .ignored = .empty,
+            .entries = .empty,
         };
         return watch;
     }
 
     pub fn deinit(self: *Watch, allocator: mem.Allocator) void {
-        for (self.paths.items) |pth| {
+        for (self.entries.items(.path)) |pth| {
             allocator.free(pth);
         }
 
-        self.paths.deinit(allocator);
-        self.watches.deinit(allocator);
-        self.ignored.deinit(allocator);
-
+        self.entries.deinit(allocator);
         posix.close(@intFromEnum(self.fd));
-
         allocator.destroy(self);
     }
 
@@ -105,35 +103,23 @@ pub const Watch = struct {
 
         const idx_maybe = sort.binarySearch(
             WatchDescriptor,
-            self.watches.items,
+            self.entries.items(.watch),
             @as(WatchDescriptor, @enumFromInt(wd)),
             comp,
         );
 
-        if (idx_maybe) |idx| {
+        if (idx_maybe != null) {
             @branchHint(.unlikely);
             // Watch already exists.
-            _ = idx;
             allocator.free(watch_path);
             return;
-        } else {
-            @branchHint(.likely);
-            try self.paths.append(allocator, watch_path);
-            errdefer {
-                debug.assert(self.paths.items.len > 0);
-                const str = self.paths.pop().?;
-                allocator.free(str);
-            }
-
-            try self.watches.append(allocator, @enumFromInt(wd));
-            errdefer {
-                debug.assert(self.paths.items.len > 0);
-                const w = self.paths.pop().?;
-                allocator.free(w);
-            }
-
-            try self.ignored.append(allocator, false);
         }
+
+        try self.entries.append(allocator, .{
+            .path = watch_path,
+            .watch = @enumFromInt(wd),
+            .ignored = false,
+        });
     }
 
     /// Remove watch with either `WatchDescriptor` or `[]u8`.
@@ -141,6 +127,7 @@ pub const Watch = struct {
     pub fn remove(self: *Watch, watch_or_path: anytype) void {
         const T = @TypeOf(watch_or_path);
         const info = @typeInfo(T);
+        const slc = self.entries.slice();
         switch (info) {
             .pointer => {
                 // TODO: Find a better way to validate a string-like type
@@ -148,9 +135,9 @@ pub const Watch = struct {
                 _ = is_a_string;
                 const str: T = watch_or_path;
                 for (
-                    self.paths.items,
-                    self.watches.items,
-                    self.ignored.items,
+                    slc.items(.path),
+                    slc.items(.watch),
+                    slc.items(.ignored),
                     0..,
                 ) |pth, wth, rm, idx| {
                     if (!rm and mem.eql(u8, pth, str)) {
@@ -158,7 +145,7 @@ pub const Watch = struct {
                             @intFromEnum(self.fd),
                             @intFromEnum(wth),
                         );
-                        self.ignored.items[idx] = true;
+                        slc.items(.ignored)[idx] = true;
                         break;
                     }
                 } else {
@@ -171,17 +158,17 @@ pub const Watch = struct {
                     @compileError(fmt.comptimePrint("Expected `WatchDescriptor` type, found `{}`", .{T}));
                 }
                 const wd: T = watch_or_path;
-                const idx_maybe = sort.binarySearch(WatchDescriptor, self.watches.items, wd, comp);
+                const idx_maybe = sort.binarySearch(WatchDescriptor, slc.items(.watch), wd, comp);
                 if (idx_maybe) |idx| {
-                    if (self.ignored.items[idx]) {
+                    if (slc.items(.ignored)[idx]) {
                         @branchHint(.cold);
-                        debug.panic("Trying to remove `{}`, but it was already removed.\n", .{self.watches.items[idx]});
+                        debug.panic("Trying to remove `{}`, but it was already removed.\n", .{slc.items(.watch)[idx]});
                     } else {
                         posix.inotify_rm_watch(
                             @intFromEnum(self.fd),
                             @intFromEnum(wd),
                         );
-                        self.ignored.items[idx] = true;
+                        slc.items(.ignored)[idx] = true;
                     }
                 } else {
                     @branchHint(.cold);
@@ -195,7 +182,7 @@ pub const Watch = struct {
 
 test "init and deinit inotify" {
     const watch: *Watch = try .init(testing.allocator, .empty);
-    std.debug.print("inotify event queue fd: {d}\n", .{watch.fd});
+    debug.print("inotify event queue fd: {d}\n", .{watch.fd});
     defer watch.deinit(testing.allocator);
 }
 
@@ -226,8 +213,10 @@ test "add and remove watches" {
         .{ .in_access = true },
     );
 
-    try testing.expectEqual(1, @intFromEnum(watch.watches.items[0]));
-    try testing.expectEqual(2, @intFromEnum(watch.watches.items[1]));
+    var slc = watch.entries.slice();
+
+    try testing.expectEqual(1, @intFromEnum(slc.items(.watch)[0]));
+    try testing.expectEqual(2, @intFromEnum(slc.items(.watch)[1]));
 
     var buf: [posix.PATH_MAX]u8 = undefined;
     const cwd = try posix.getcwd(&buf);
@@ -243,17 +232,17 @@ test "add and remove watches" {
     );
     defer testing.allocator.free(expected_path2);
 
-    std.debug.print("{d}: watched file = {s}\n", .{
-        watch.watches.items[0],
-        watch.paths.items[0],
+    debug.print("{d}: watched file = {s}\n", .{
+        slc.items(.watch)[0],
+        slc.items(.path)[0],
     });
-    try testing.expectEqualStrings(expected_path, watch.paths.items[0]);
-    std.debug.print("{d}: watched dir = {s}\n", .{
-        watch.watches.items[1],
-        watch.paths.items[1],
+    try testing.expectEqualStrings(expected_path, slc.items(.path)[0]);
+    debug.print("{d}: watched dir = {s}\n", .{
+        slc.items(.watch)[1],
+        slc.items(.path)[1],
     });
-    try testing.expectEqualStrings(expected_path2, watch.paths.items[1]);
-    try testing.expectEqualSlices(bool, &.{ false, false }, watch.ignored.items);
+    try testing.expectEqualStrings(expected_path2, slc.items(.path)[1]);
+    try testing.expectEqualSlices(bool, &.{ false, false }, slc.items(.ignored));
 
     const watch2: *Watch = try .init(testing.allocator, .empty);
     defer watch2.deinit(testing.allocator);
@@ -263,20 +252,23 @@ test "add and remove watches" {
         "test/watched",
         .{ .in_access = true },
     );
-    std.debug.print("{d}: watched dir2 = {s}\n", .{
-        watch2.watches.items[0],
-        watch2.paths.items[0],
+
+    const slc2 = watch2.entries.slice();
+
+    debug.print("{d}: watched dir2 = {s}\n", .{
+        slc2.items(.watch)[0],
+        slc2.items(.path)[0],
     });
-    try testing.expectEqual(1, @intFromEnum(watch2.watches.items[0]));
+    try testing.expectEqual(1, @intFromEnum(slc2.items(.watch)[0]));
 
     watch.remove(expected_path);
-    try testing.expectEqualSlices(bool, &.{ true, false }, watch.ignored.items);
+    try testing.expectEqualSlices(bool, &.{ true, false }, slc.items(.ignored));
 
     watch.remove(@as(WatchDescriptor, @enumFromInt(2)));
-    try testing.expectEqualSlices(bool, &.{ true, true }, watch.ignored.items);
+    try testing.expectEqualSlices(bool, &.{ true, true }, slc.items(.ignored));
 
     watch2.remove(@as(WatchDescriptor, @enumFromInt(1)));
-    try testing.expectEqualSlices(bool, &.{true}, watch2.ignored.items);
+    try testing.expectEqualSlices(bool, &.{true}, slc2.items(.ignored));
 
     try watch.add(
         testing.allocator,
@@ -284,11 +276,14 @@ test "add and remove watches" {
         .{ .in_access = true },
     );
 
-    std.debug.print("{d}: watched file = {s}\n", .{
-        watch.watches.items[2],
-        watch.paths.items[2],
+    // update slice to include newest element
+    slc = watch.entries.slice();
+
+    debug.print("{d}: watched file = {s}\n", .{
+        slc.items(.watch)[2],
+        slc.items(.path)[2],
     });
-    try testing.expectEqual(3, @intFromEnum(watch.watches.items[2]));
+    try testing.expectEqual(3, @intFromEnum(slc.items(.watch)[2]));
     watch.remove(@as(WatchDescriptor, @enumFromInt(3)));
 }
 
@@ -303,10 +298,12 @@ test "multiple watches for the same file" {
             .{ .in_access = true },
         );
     }
-    try testing.expectEqual(1, watch.watches.items.len);
-    try testing.expectEqualSlices(bool, &.{false}, watch.ignored.items);
+    const slc = watch.entries.slice();
+    try testing.expectEqual(1, slc.items(.watch).len);
+    try testing.expectEqualSlices(bool, &.{false}, slc.items(.ignored));
 }
 
 test {
+    _ = @This();
     _ = @import("flags.zig");
 }

@@ -60,8 +60,8 @@ pub const Watch = struct {
 
         watch.* = .{
             .fd = fd,
-            .entries = .empty,
-            .events = .empty,
+            .entries = .empty, //TODO: init with configurable capacity
+            .events = .empty, //TODO: init with configurable capacity
         };
         return watch;
     }
@@ -192,6 +192,7 @@ pub const Watch = struct {
         self: *Watch,
         gpa: mem.Allocator,
     ) (mem.Allocator.Error || posix.ReadError)!void {
+        // TODO: Make configurable
         var buf: [4096]u8 = undefined;
         const n_bytes = try posix.read(@intFromEnum(self.fd), &buf);
 

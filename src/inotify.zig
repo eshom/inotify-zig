@@ -47,11 +47,11 @@ pub const Watch = struct {
     }
 
     pub fn init(
-        allocator: mem.Allocator,
+        gpa: mem.Allocator,
         init_flags: flags.InitFlags,
     ) (mem.Allocator.Error || posix.INotifyInitError)!*Watch {
-        const watch: *Watch = try allocator.create(Watch);
-        errdefer allocator.destroy(watch);
+        const watch: *Watch = try gpa.create(Watch);
+        errdefer gpa.destroy(watch);
 
         const fd: EventQueueFD = @enumFromInt(
             try posix.inotify_init1(@bitCast(init_flags)),
@@ -66,28 +66,28 @@ pub const Watch = struct {
         return watch;
     }
 
-    pub fn deinit(self: *Watch, allocator: mem.Allocator) void {
+    pub fn deinit(self: *Watch, gpa: mem.Allocator) void {
         for (self.entries.items(.path)) |pth| {
-            allocator.free(pth);
+            gpa.free(pth);
         }
 
-        self.entries.deinit(allocator);
+        self.entries.deinit(gpa);
 
         for (self.events.items(.name)) |name| {
             if (name) |str| {
-                allocator.free(str);
+                gpa.free(str);
             }
         }
 
-        self.events.deinit(allocator);
+        self.events.deinit(gpa);
         posix.close(@intFromEnum(self.fd));
-        allocator.destroy(self);
+        gpa.destroy(self);
     }
 
     // TODO: Test invalid path inputs (fuzz!)
     pub fn add(
         self: *Watch,
-        allocator: mem.Allocator,
+        gpa: mem.Allocator,
         pathname: []const u8,
         mask: flags.EventFlags,
     ) (posix.INotifyAddWatchError ||
@@ -98,8 +98,8 @@ pub const Watch = struct {
         const cwd = try posix.getcwd(&path_buf);
         if ((posix.PATH_MAX -| pathname.len -| cwd.len) == 0) return error.NameTooLong;
 
-        const watch_path = try path.resolve(allocator, &.{ cwd, pathname });
-        errdefer allocator.free(watch_path);
+        const watch_path = try path.resolve(gpa, &.{ cwd, pathname });
+        errdefer gpa.free(watch_path);
 
         // For an inotify instance, wd values are never reused and keep increasing.
         // This is why you cannot use them as indices to an array.
@@ -120,11 +120,11 @@ pub const Watch = struct {
         if (idx_maybe != null) {
             @branchHint(.unlikely);
             // Watch already exists.
-            allocator.free(watch_path);
+            gpa.free(watch_path);
             return;
         }
 
-        try self.entries.append(allocator, .{
+        try self.entries.append(gpa, .{
             .path = watch_path,
             .watch = @enumFromInt(wd),
             .ignored = false,
@@ -190,7 +190,7 @@ pub const Watch = struct {
 
     pub fn readEvents(
         self: *Watch,
-        allocator: mem.Allocator,
+        gpa: mem.Allocator,
     ) (mem.Allocator.Error || posix.ReadError)!void {
         var buf: [4096]u8 = undefined;
         const n_bytes = try posix.read(@intFromEnum(self.fd), &buf);
@@ -212,8 +212,8 @@ pub const Watch = struct {
 
             offset += event.len;
 
-            const name_copy = if (name) |str| try allocator.dupe(u8, str) else null;
-            errdefer if (name_copy) |str| allocator.free(str);
+            const name_copy = if (name) |str| try gpa.dupe(u8, str) else null;
+            errdefer if (name_copy) |str| gpa.free(str);
 
             const event_out: INotifyEvent = .{
                 .wd = @enumFromInt(event.wd),
@@ -222,7 +222,7 @@ pub const Watch = struct {
                 .name = name_copy,
             };
 
-            try self.events.append(allocator, event_out);
+            try self.events.append(gpa, event_out);
         }
         debug.assert(offset == n_bytes);
     }

@@ -9,7 +9,6 @@ const path = std.fs.path;
 const process = std.process;
 const fmt = std.fmt;
 const sort = std.sort;
-const INotifyEvent = linux.inotify_event;
 
 pub const flags = @import("flags.zig");
 
@@ -30,6 +29,7 @@ pub const WatchEntry = struct {
 pub const Watch = struct {
     fd: EventQueueFD,
     entries: std.MultiArrayList(WatchEntry),
+    events: std.MultiArrayList(INotifyEvent),
 
     fn comp(a: WatchDescriptor, b: WatchDescriptor) math.Order {
         const a_ = @intFromEnum(a);
@@ -61,6 +61,7 @@ pub const Watch = struct {
         watch.* = .{
             .fd = fd,
             .entries = .empty,
+            .events = .empty,
         };
         return watch;
     }
@@ -71,6 +72,7 @@ pub const Watch = struct {
         }
 
         self.entries.deinit(allocator);
+        self.events.deinit(allocator);
         posix.close(@intFromEnum(self.fd));
         allocator.destroy(self);
     }
@@ -176,6 +178,32 @@ pub const Watch = struct {
                 }
             },
             else => @compileError(fmt.comptimePrint("Expected either a string-like type or `WatchDescriptor`, found `{}`\n", .{T})),
+        }
+    }
+
+    pub fn readEvents(
+        self: *Watch,
+        allocator: mem.Allocator,
+    ) (mem.Allocator.Error || posix.ReadError)!void {
+        _ = allocator;
+        var buf: [4096]u8 = undefined;
+        const n_bytes = try posix.read(@intFromEnum(self.fd), &buf);
+        debug.print("read bytes: {}\n", .{n_bytes});
+        debug.assert(n_bytes > 0); // old kernels not supported
+
+        // const alignment = @alignOf(linux.inotify_event);
+
+        var offset: usize = 0;
+        while (offset < n_bytes) {
+            const event_bytes: []const u8 = buf[offset .. offset + @sizeOf(linux.inotify_event)];
+            offset += event_bytes.len;
+            const event: *const linux.inotify_event = @ptrCast(@alignCast(event_bytes));
+            debug.print("raw event: {} (size: {})\n", .{ event, @sizeOf(linux.inotify_event) });
+            debug.print("current offset before name: {}\n", .{offset});
+            // const name = event.getName();
+            offset += event.len;
+            // debug.print("name?: {s?}", .{name});
+            debug.print("current offset after name: {}\n", .{offset});
         }
     }
 };
@@ -306,4 +334,33 @@ test "multiple watches for the same file" {
 test {
     _ = @This();
     _ = @import("flags.zig");
+}
+
+pub const INotifyEvent = struct {
+    wd: WatchDescriptor,
+    mask: flags.EventFlags,
+    cookie: u32,
+    len: u32,
+    name: ?[]const u8,
+};
+
+test "read one file event from watched dir" {
+    const watch: *Watch = try .init(testing.allocator, .non_blocking);
+    defer watch.deinit(testing.allocator);
+
+    try watch.add(
+        testing.allocator,
+        "test/watched",
+        .{ .in_open = true },
+    );
+
+    const touch = try process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &.{ "touch", "test/watched/touched_file" },
+    });
+
+    defer testing.allocator.free(touch.stdout);
+    defer testing.allocator.free(touch.stderr);
+
+    try watch.readEvents(testing.allocator);
 }

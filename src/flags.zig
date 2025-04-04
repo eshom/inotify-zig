@@ -41,11 +41,11 @@ test @"and" {
 }
 
 pub const InitFlags = packed struct(u32) {
-    _padding1: u11 = 0,
+    _1: u11 = 0,
     in_nonblock: bool = false,
-    _padding2: u7 = 0,
+    _13: u7 = 0,
     in_cloexec: bool = false,
-    _padding3: u12 = 0,
+    _21: u12 = 0,
 
     pub const empty: InitFlags = .{};
     pub const non_blocking: InitFlags = .{ .in_nonblock = true };
@@ -68,17 +68,17 @@ pub const EventFlags = packed struct(u32) {
     in_delete: bool = false,
     in_delete_self: bool = false,
     in_move_self: bool = false,
-    _padding1: u1 = 0, // bit 13
+    _13: u1 = 0,
     // Events sent by the kernel.
     in_unmount: bool = false,
     in_q_overflow: bool = false,
     in_ignored: bool = false,
-    _padding2: u8 = 0,
+    _17: u8 = 0,
     // Special flags
     in_onlydir: bool = false,
     in_dont_follow: bool = false,
     in_excl_unlink: bool = false,
-    _padding3: u1 = 0, // bit 28
+    _28: u1 = 0, // bit 28
     in_mask_create: bool = false,
     in_mask_add: bool = false,
     in_isdir: bool = false,

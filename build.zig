@@ -5,6 +5,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const no_llvm = b.option(bool, "no-llvm", "Use self hosted backend") orelse false;
+
     const inotify_root = b.addModule("inotify", .{
         .root_source_file = b.path("src/inotify.zig"),
         .target = target,
@@ -13,8 +15,7 @@ pub fn build(b: *std.Build) void {
 
     const lib_unit_tests = b.addTest(.{
         .root_module = inotify_root,
-        .use_llvm = if (builtin.mode == .Debug) false else true,
-        .use_lld = if (builtin.mode == .Debug) false else true,
+        .use_llvm = !no_llvm,
     });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
@@ -27,8 +28,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
         .name = "inotify-zig",
         .root_module = inotify_root,
-        .use_llvm = if (builtin.mode == .Debug) false else true,
-        .use_lld = if (builtin.mode == .Debug) false else true,
+        .use_llvm = !no_llvm,
     });
 
     const check = b.step("check", "Check step for usage with zls");
